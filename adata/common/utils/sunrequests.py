@@ -10,22 +10,77 @@
 
 import threading
 import time
+from collections import deque
+from urllib.parse import urlparse
 
 import requests
+
+
+class RateLimiter:
+    """频率限制器，用于限制同一域名的请求频率"""
+    _lock = threading.Lock()
+    _domain_requests = {}
+    _default_limit = 30
+    _domain_limits = {}
+
+    def __new__(cls, *args, **kwargs):
+        if not hasattr(cls, '_instance'):
+            cls._instance = super(RateLimiter, cls).__new__(cls, *args, **kwargs)
+        return cls._instance
+
+    def set_default_limit(self, limit):
+        """设置默认频率限制（每分钟请求数）"""
+        with self._lock:
+            self._default_limit = limit
+
+    def set_domain_limit(self, domain, limit):
+        """设置特定域名的频率限制（每分钟请求数）"""
+        with self._lock:
+            self._domain_limits[domain] = limit
+
+    def _get_limit(self, domain):
+        """获取域名的频率限制"""
+        return self._domain_limits.get(domain, self._default_limit)
+
+    def acquire(self, url):
+        """获取请求许可，需要等待时自动等待"""
+        domain = urlparse(url).netloc
+        now = time.time()
+        one_minute_ago = now - 60
+
+        with self._lock:
+            if domain not in self._domain_requests:
+                self._domain_requests[domain] = deque()
+
+            requests_queue = self._domain_requests[domain]
+            
+            while requests_queue and requests_queue[0] < one_minute_ago:
+                requests_queue.popleft()
+
+            limit = self._get_limit(domain)
+            
+            if len(requests_queue) >= limit:
+                wait_time = requests_queue[0] - one_minute_ago
+                time.sleep(wait_time)
+                requests_queue.popleft()
+
+            requests_queue.append(time.time())
 
 
 class SunProxy(object):
     _data = {}
     _instance_lock = threading.Lock()
+    _instance = None
 
     def __init__(self):
         pass
 
     def __new__(cls, *args, **kwargs):
-        if not hasattr(SunProxy, "_instance"):
+        if not hasattr(SunProxy, "_instance") or SunProxy._instance is None:
             with SunProxy._instance_lock:
-                if not hasattr(SunProxy, "_instance"):
-                    SunProxy._instance = object.__new__(cls)
+                if not hasattr(SunProxy, "_instance") or SunProxy._instance is None:
+                    SunProxy._instance = super(SunProxy, cls).__new__(cls, *args, **kwargs)
+        return SunProxy._instance
 
     @classmethod
     def set(cls, key, value):
@@ -42,9 +97,21 @@ class SunProxy(object):
 
 
 class SunRequests(object):
-    def __init__(self, sun_proxy: SunProxy = None) -> None:
+    def __init__(self, sun_proxy: SunProxy = None, enable_rate_limit=True) -> None:
         super().__init__()
         self.sun_proxy = sun_proxy
+        self.enable_rate_limit = enable_rate_limit
+        self._rate_limiter = RateLimiter() if enable_rate_limit else None
+
+    def set_default_limit(self, limit):
+        """设置默认频率限制（每分钟请求数）"""
+        if self._rate_limiter:
+            self._rate_limiter.set_default_limit(limit)
+
+    def set_domain_limit(self, domain, limit):
+        """设置特定域名的频率限制（每分钟请求数）"""
+        if self._rate_limiter:
+            self._rate_limiter.set_domain_limit(domain, limit)
 
     def request(self, method='get', url=None, times=3, retry_wait_time=1588, proxies=None, wait_time=None, **kwargs):
         """
@@ -58,6 +125,8 @@ class SunRequests(object):
         :param kwargs: 其它 requests 参数，用法相同
         :return: res
         """
+        if self.enable_rate_limit and url and self._rate_limiter:
+            self._rate_limiter.acquire(url)
         # 1. 获取设置代理
         proxies = self.__get_proxies(proxies)
         # 2. 请求数据结果
@@ -91,3 +160,4 @@ class SunRequests(object):
 
 
 sun_requests = SunRequests()
+rate_limiter = RateLimiter()
