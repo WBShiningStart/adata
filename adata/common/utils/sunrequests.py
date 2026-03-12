@@ -87,29 +87,31 @@ class RateLimiter:
         domain = self._extract_domain(url)
         limit = self._domain_limits[domain]
 
-        with self._lock:
-            now = time.time()
-            # 清理60秒前的请求记录
-            self._domain_requests[domain] = [
-                ts for ts in self._domain_requests[domain]
-                if now - ts < 60
-            ]
+        while True:
+            with self._lock:
+                now = time.time()
+                # 清理60秒前的请求记录
+                self._domain_requests[domain] = [
+                    ts for ts in self._domain_requests[domain]
+                    if now - ts < 60
+                ]
 
-            # 如果超过限制，计算需要等待的时间
-            if len(self._domain_requests[domain]) >= limit:
+                # 检查是否超过限制
+                if len(self._domain_requests[domain]) < limit:
+                    # 记录本次请求并放行
+                    self._domain_requests[domain].append(now)
+                    return
+
+                # 计算需要等待的时间
                 oldest_request = self._domain_requests[domain][0]
                 wait_time = 60 - (now - oldest_request)
-                if wait_time > 0:
-                    time.sleep(wait_time)
-                    now = time.time()
-                    # 重新清理
-                    self._domain_requests[domain] = [
-                        ts for ts in self._domain_requests[domain]
-                        if now - ts < 60
-                    ]
 
-            # 记录本次请求
-            self._domain_requests[domain].append(now)
+            # 在锁外等待，避免阻塞其他线程
+            if wait_time > 0:
+                time.sleep(wait_time)
+            else:
+                # 如果不需要等待，短暂休眠避免CPU空转
+                time.sleep(0.01)
 
     def _extract_domain(self, url: str) -> str:
         """从URL中提取域名"""
